@@ -2,6 +2,8 @@ import argparse
 from pathlib import Path
 from typing import Iterable
 
+from rich.console import Console
+
 from .config import RecorderConfig
 from .recorder import RecorderService, start_background, stop_background
 
@@ -63,7 +65,9 @@ def run_cli(argv: Iterable[str] | None = None) -> None:
     config = config_from_args(args)
 
     if args.command == "run":
-        RecorderService(config).run()
+        console = Console()
+        with console.status("Recording... press Ctrl+C to stop", spinner="dots"):
+            RecorderService(config, console=console).run()
     elif args.command == "start":
         extra = _extra_args_from_namespace(args)
         start_background(config, extra)

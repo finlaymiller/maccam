@@ -16,7 +16,7 @@ pip install -e .
 Run the recorder in the foreground:
 
 ```bash
-maccam run --motion --notify-url https://ntfy.sh/your-topic
+maccam run --motion --notify-url https://ntfy.sh/finlays_room
 ```
 
 Start and stop a background session with PID tracking:

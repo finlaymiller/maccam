@@ -9,12 +9,22 @@ from pathlib import Path
 from threading import Event
 from typing import Optional
 
+from rich.console import Console
+
 from .config import RecorderConfig
 
 
 class RecorderService:
-    def __init__(self, config: RecorderConfig) -> None:
+    _VIDEO_WRITER_OPTIONS = (
+        (".mp4", "mp4v"),
+        (".mp4", "avc1"),
+        (".mov", "avc1"),
+        (".avi", "MJPG"),
+    )
+
+    def __init__(self, config: RecorderConfig, console: Console | None = None) -> None:
         self.config = config
+        self.console = console
         self.stop_event = Event()
         self.config.ensure_directories()
 
@@ -40,20 +50,23 @@ class RecorderService:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.height)
         cap.set(cv2.CAP_PROP_FPS, self.config.fps)
+        self._log(
+            f"Camera ready on device {self.config.device_index} at "
+            f"{self.config.width}x{self.config.height}@{self.config.fps}fps"
+        )
 
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        video_path = self._next_video_path()
-        writer = cv2.VideoWriter(str(video_path), fourcc, float(self.config.fps), (self.config.width, self.config.height))
-        writer.set(cv2.VIDEOWRITER_PROP_BITRATE, float(self.config.bitrate))
-        if not writer.isOpened():
+        try:
+            writer, video_path = self._create_video_writer(cv2)
+        except RuntimeError:
             cap.release()
-            raise RuntimeError(f"Could not create video writer at {video_path}")
+            raise
 
         last_cleanup = time.monotonic()
         previous_gray: Optional[object] = None
         motion_active = False
 
         def _handle_signal(signum, frame):
+            self._log(f"Signal {signum} received; stopping recorder")
             self.stop_event.set()
 
         signal.signal(signal.SIGTERM, _handle_signal)
@@ -80,9 +93,11 @@ class RecorderService:
                 should_write = motion_detected
                 if motion_detected and not motion_active:
                     motion_active = True
+                    self._log(f"Motion detected (ratio={motion_ratio:.4f}); recording resumed")
                     self._notify_motion(motion_ratio)
                 elif not motion_detected and motion_active:
                     motion_active = False
+                    self._log("Motion ended; pausing recording until motion resumes")
 
             if should_write:
                 writer.write(frame)
@@ -94,21 +109,52 @@ class RecorderService:
 
         cap.release()
         writer.release()
+        self._log("Recorder stopped")
 
-    def _next_video_path(self) -> Path:
+    def _create_video_writer(self, cv2):
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"recording-{timestamp}.mp4"
+        attempted: list[str] = []
+        frame_size = (self.config.width, self.config.height)
+        for extension, codec in self._VIDEO_WRITER_OPTIONS:
+            video_path = self._next_video_path(timestamp=timestamp, extension=extension)
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            writer = cv2.VideoWriter(
+                str(video_path),
+                fourcc,
+                float(self.config.fps),
+                frame_size,
+            )
+            if writer.isOpened():
+                bitrate_prop = getattr(cv2, "VIDEOWRITER_PROP_BITRATE", None)
+                if bitrate_prop is not None:
+                    writer.set(bitrate_prop, float(self.config.bitrate))
+                self._log(f"Recording to {video_path} using codec {codec}")
+                return writer, video_path
+            writer.release()
+            attempted.append(f"{codec}{extension}")
+        raise RuntimeError(
+            "Could not create video writer in "
+            f"{self.config.output_dir}; tried codecs: "
+            + ", ".join(attempted)
+        )
+
+    def _next_video_path(self, *, timestamp: Optional[str] = None, extension: str = ".mp4") -> Path:
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"recording-{timestamp}{extension}"
         return self.config.output_dir / filename
 
     def _cleanup_old_files(self) -> None:
         cutoff = datetime.now() - timedelta(days=self.config.retention_days)
-        for file in self.config.output_dir.glob("recording-*.mp4"):
-            try:
-                mtime = datetime.fromtimestamp(file.stat().st_mtime)
-                if mtime < cutoff:
-                    file.unlink()
-            except OSError:
-                continue
+        extensions = {option[0] for option in self._VIDEO_WRITER_OPTIONS}
+        for extension in extensions:
+            for file in self.config.output_dir.glob(f"recording-*{extension}"):
+                try:
+                    mtime = datetime.fromtimestamp(file.stat().st_mtime)
+                    if mtime < cutoff:
+                        file.unlink()
+                except OSError:
+                    continue
 
     def _notify_motion(self, motion_ratio: float) -> None:
         if not self.config.notify_url:
@@ -121,6 +167,9 @@ class RecorderService:
         }
         import requests
 
+        self._log(
+            f"Sending motion notification to {self.config.notify_url} (ratio={motion_ratio:.4f})"
+        )
         try:
             requests.post(
                 self.config.notify_url,
@@ -128,9 +177,17 @@ class RecorderService:
                 headers={"Content-Type": "application/json"},
                 timeout=5,
             )
-        except requests.RequestException:
+            self._log("Motion notification delivered")
+        except requests.RequestException as exc:
+            self._log(f"Motion notification failed: {exc}")
             # Notifications are best-effort; errors are ignored intentionally.
             pass
+
+    def _log(self, message: str) -> None:
+        if self.console is not None:
+            self.console.log(message)
+        else:
+            print(message)
 
 
 def start_background(config: RecorderConfig, extra_args: list[str]) -> None:

@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .venv/
 .maccam/
+src/maccam.egg-info
