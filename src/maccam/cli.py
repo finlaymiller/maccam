@@ -27,6 +27,18 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--motion-threshold", type=int, default=25, help="Pixel intensity threshold for motion detection")
         p.add_argument("--motion-ratio", type=float, default=0.01, help="Fraction of pixels that must change to trigger motion")
         p.add_argument("--notify-url", type=str, help="Webhook URL for motion notifications")
+        p.add_argument(
+            "--motion-post-seconds",
+            type=int,
+            default=DEFAULT_CONFIG.motion_post_seconds,
+            help="How long to continue recording after motion stops (default: 3)",
+        )
+        p.add_argument("--google-drive-token", type=str, help="Access token for Google Drive uploads")
+        p.add_argument(
+            "--google-drive-folder",
+            type=str,
+            help="Optional Google Drive folder ID where uploads should be stored",
+        )
 
     run_parser = subparsers.add_parser("run", help="Run recorder in the foreground")
     add_common_options(run_parser)
@@ -56,6 +68,9 @@ def config_from_args(args: argparse.Namespace) -> RecorderConfig:
         motion_pixel_ratio=args.motion_ratio,
         notify_url=args.notify_url,
         pid_file=args.pid_file if isinstance(args.pid_file, Path) else Path(args.pid_file),
+        google_drive_access_token=args.google_drive_token,
+        google_drive_folder_id=args.google_drive_folder,
+        motion_post_seconds=args.motion_post_seconds,
     )
 
 
@@ -89,10 +104,15 @@ def _extra_args_from_namespace(args: argparse.Namespace) -> list[str]:
         ("--retention-days", args.retention_days),
         ("--motion-threshold", args.motion_threshold),
         ("--motion-ratio", args.motion_ratio),
+        ("--motion-post-seconds", args.motion_post_seconds),
     ]:
         flags.extend([flag[0], str(flag[1])])
     if args.motion:
         flags.append("--motion")
     if args.notify_url:
         flags.extend(["--notify-url", args.notify_url])
+    if args.google_drive_token:
+        flags.extend(["--google-drive-token", args.google_drive_token])
+    if args.google_drive_folder:
+        flags.extend(["--google-drive-folder", args.google_drive_folder])
     return flags
