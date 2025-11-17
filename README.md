@@ -33,13 +33,27 @@ Common options:
 - `--fps`: Frames per second (default: 15)
 - `--bitrate`: Target bitrate in bits/s (default: 500000)
 - `--output-dir`: Directory where recordings are saved
-- `--retention-days`: How many days of recordings to keep (default: 7)
+- `--retention-days`: How many days of recordings to keep (default: 7). Currently recordings are never deleted to preserve a complete archive.
 - `--motion`: Enable motion-triggered recording via frame differencing
 - `--motion-threshold`: Pixel intensity delta that counts as motion (default: 25)
 - `--motion-ratio`: Fraction of changed pixels needed to trigger motion (default: 0.01)
+- `--motion-post-seconds`: Seconds to keep recording after motion subsides (default: 3)
 - `--notify-url`: Webhook endpoint (Pushcut/ntfy/etc.) invoked on motion events
+- `--google-drive-token`: OAuth access token used for Drive uploads (can also be set via `GOOGLE_DRIVE_ACCESS_TOKEN` environment variable)
+- `--google-drive-folder`: Optional Drive folder ID where videos should be uploaded
 
-Recordings are written to timestamped files in the output directory. When motion detection is enabled, frames are only written while motion is detected. A housekeeping pass runs every five minutes to delete recordings older than the configured retention period (default one week).
+Recordings are written to timestamped files in the output directory. When motion detection is enabled, recording starts on motion and continues for a short post-roll (default three seconds) after motion stops. Each completed clip is uploaded to Google Drive when credentials are provided, and a new file is started after each upload attempt. Files are never removed from disk, and notifications are buffered so that motion alerts are followed by an upload result notification before another motion alert is sent.
+
+### Getting a Google Drive access token
+
+MacCam expects a short-lived OAuth access token with the `https://www.googleapis.com/auth/drive.file` scope:
+
+1. Visit the [OAuth 2.0 Playground](https://developers.google.com/oauthplayground) and expand **Step 1**.
+2. Under "Input your own scopes" enter `https://www.googleapis.com/auth/drive.file` and click **Authorize APIs**. Sign in and approve when prompted.
+3. In **Step 2**, click **Exchange authorization code for tokens**. Copy the **Access token** value (ignore the refresh token; MacCam currently only accepts the access token).
+4. Start MacCam with `--google-drive-token <copied token>` or set `GOOGLE_DRIVE_ACCESS_TOKEN=<copied token>` in the environment.
+
+Access tokens typically expire within an hour; when uploads start failing with `401 Unauthorized`, repeat the steps above to fetch a new token.
 
 ## Running continuously on power
 

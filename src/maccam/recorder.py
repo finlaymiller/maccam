@@ -55,15 +55,13 @@ class RecorderService:
             f"{self.config.width}x{self.config.height}@{self.config.fps}fps"
         )
 
-        try:
-            writer, video_path = self._create_video_writer(cv2)
-        except RuntimeError:
-            cap.release()
-            raise
-
-        last_cleanup = time.monotonic()
+        writer = None
+        video_path: Optional[Path] = None
         previous_gray: Optional[object] = None
         motion_active = False
+        recording_active = False
+        last_motion_seen: Optional[float] = None
+        notifications_blocked = False
 
         def _handle_signal(signum, frame):
             self._log(f"Signal {signum} received; stopping recorder")
@@ -78,7 +76,6 @@ class RecorderService:
                 time.sleep(0.1)
                 continue
 
-            should_write = True
             if self.config.motion_detection:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 gray = cv2.GaussianBlur(gray, (21, 21), 0)
@@ -90,25 +87,48 @@ class RecorderService:
                 motion_ratio = cv2.countNonZero(thresh) / (self.config.width * self.config.height)
                 motion_detected = motion_ratio >= self.config.motion_pixel_ratio
                 previous_gray = gray
-                should_write = motion_detected
-                if motion_detected and not motion_active:
+                if motion_detected:
+                    last_motion_seen = time.monotonic()
+                    if not recording_active:
+                        writer, video_path = self._create_video_writer(cv2)
+                        recording_active = True
+                        self._log(
+                            f"Motion detected (ratio={motion_ratio:.4f}); recording started with post-roll of {self.config.motion_post_seconds}s"
+                        )
+                        if not notifications_blocked:
+                            self._notify_motion(motion_ratio)
+                            notifications_blocked = True
                     motion_active = True
-                    self._log(f"Motion detected (ratio={motion_ratio:.4f}); recording resumed")
-                    self._notify_motion(motion_ratio)
-                elif not motion_detected and motion_active:
+                else:
                     motion_active = False
-                    self._log("Motion ended; pausing recording until motion resumes")
+            else:
+                motion_detected = True
+                if not recording_active:
+                    writer, video_path = self._create_video_writer(cv2)
+                    recording_active = True
 
-            if should_write:
+            if recording_active and writer is not None:
                 writer.write(frame)
 
-            now = time.monotonic()
-            if now - last_cleanup > 300:
-                self._cleanup_old_files()
-                last_cleanup = now
+            if (
+                recording_active
+                and self.config.motion_detection
+                and not motion_active
+                and last_motion_seen is not None
+                and (time.monotonic() - last_motion_seen) >= self.config.motion_post_seconds
+            ):
+                writer.release()
+                if video_path is not None:
+                    success, error = self._upload_to_google_drive(video_path)
+                    self._notify_upload(success, video_path, error)
+                writer = None
+                video_path = None
+                recording_active = False
+                notifications_blocked = False
 
         cap.release()
-        writer.release()
+        if writer is not None:
+            writer.release()
         self._log("Recorder stopped")
 
     def _create_video_writer(self, cv2):
@@ -181,6 +201,72 @@ class RecorderService:
         except requests.RequestException as exc:
             self._log(f"Motion notification failed: {exc}")
             # Notifications are best-effort; errors are ignored intentionally.
+            pass
+
+    def _upload_to_google_drive(self, video_path: Path) -> tuple[bool, Optional[str]]:
+        token = self.config.google_drive_access_token
+        if not token:
+            self._log("Google Drive upload skipped: no access token configured")
+            return False, "No Google Drive access token configured"
+
+        import requests
+
+        metadata = {"name": video_path.name}
+        if self.config.google_drive_folder_id:
+            metadata["parents"] = [self.config.google_drive_folder_id]
+
+        with video_path.open("rb") as fh:
+            files = {
+                "metadata": ("metadata", json.dumps(metadata), "application/json; charset=UTF-8"),
+                "file": (video_path.name, fh, "video/mp4"),
+            }
+            headers = {"Authorization": f"Bearer {token}"}
+            self._log(f"Uploading {video_path} to Google Drive")
+            try:
+                response = requests.post(
+                    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+                    headers=headers,
+                    files=files,
+                    timeout=60,
+                )
+                if response.status_code in (200, 201):
+                    self._log(f"Upload succeeded: {video_path}")
+                    return True, None
+                self._log(f"Upload failed with status {response.status_code}: {response.text}")
+                return False, f"HTTP {response.status_code}: {response.text}"
+            except requests.RequestException as exc:
+                self._log(f"Upload failed: {exc}")
+                return False, str(exc)
+
+    def _notify_upload(self, success: bool, video_path: Path, error: Optional[str]) -> None:
+        if not self.config.notify_url:
+            return
+
+        payload = {
+            "event": "upload_success" if success else "upload_failure",
+            "file": video_path.name,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "output_directory": str(self.config.output_dir),
+        }
+        if error:
+            payload["error"] = error
+
+        import requests
+
+        status = "succeeded" if success else "failed"
+        self._log(
+            f"Sending upload {status} notification to {self.config.notify_url} for {video_path.name}"
+        )
+        try:
+            requests.post(
+                self.config.notify_url,
+                data=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+                timeout=5,
+            )
+            self._log("Upload notification delivered")
+        except requests.RequestException as exc:
+            self._log(f"Upload notification failed: {exc}")
             pass
 
     def _log(self, message: str) -> None:
